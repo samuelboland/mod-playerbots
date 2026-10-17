@@ -14,6 +14,10 @@
 #include "Map.h"
 #include "MapCollisionData.h"
 #include "MapMgr.h"
+#include "Config.h"
+#include "GridDefines.h"
+#include "GridTerrainData.h"
+#include "World.h"
 #include "ObjectAccessor.h"
 #include "PathGenerator.h"
 #include "Playerbots.h"
@@ -4646,6 +4650,39 @@ void TravelMgr::PrepareDestinationCache()
     // Temporary map to group creatures by entry and area
     std::map<std::tuple<uint16, int32, int32, int32>, std::vector<CreatureData>> tempLocsCache;
     std::map<uint32, std::map<uint32, std::vector<WorldLocation>>> tempCreatureCache;
+    // Zones straight from the .map files, freed when this cache is built. Map::GetAreaId would create every
+    // grid that holds a spawn -- terrain, vmap and mmap tiles -- and grids never unload. Building interiors
+    // (WMO areas) are not consulted; only the zone is used below, and an interior rarely changes the zone.
+    std::unordered_map<uint32, std::unique_ptr<GridTerrainData>> zoneTerrain;
+    auto areaAt = [&zoneTerrain](uint32 mapId, float x, float y) -> uint32
+    {
+        GridCoord const gc = Acore::ComputeGridCoord(x, y);
+        uint32 const key = (mapId << 16) | (gc.x_coord << 8) | gc.y_coord;
+        auto itr = zoneTerrain.find(key);
+        if (itr == zoneTerrain.end())
+        {
+            auto data = std::make_unique<GridTerrainData>();
+            std::string const file = Acore::StringFormat("{}maps/{:03}{:02}{:02}.map", sWorld->GetDataPath(), mapId, gc.x_coord, gc.y_coord);
+            if (data->Load(file) != TerrainMapDataReadResult::Success)
+                data.reset();
+            itr = zoneTerrain.emplace(key, std::move(data)).first;
+        }
+        uint32 areaId = itr->second ? itr->second->getArea(x, y) : 0;
+        if (!areaId)
+            if (MapEntry const* entry = sMapStore.LookupEntry(mapId))
+                areaId = entry->linked_zone;
+        return areaId;
+    };
+
+    // Lab: Lab.FastTravelZones = 1 takes zones from the .map files (no grid creation). It is NOT exact: zones
+    // that exist only inside buildings (Ironforge, Undercity, Blackrock Mountain, Onyxia's Lair) come out as the
+    // surrounding ground zone. Default 0 keeps the original Map::GetAreaId. Lab.VerifyTravelZones = 1 also
+    // computes the original and logs the differences, grouped by (map, original zone, fast zone).
+    bool const labFastZones = sConfigMgr->GetOption<bool>("Lab.FastTravelZones", false, false);
+    bool const labVerifyZones = labFastZones && sConfigMgr->GetOption<bool>("Lab.VerifyTravelZones", false, false);
+    uint32 labZoneChecks = 0, labZoneMismatches = 0;
+    std::map<std::tuple<uint32, uint32, uint32>, std::pair<uint32, uint32>> labZoneDiffs; // -> (count, example guid)
+
     for (auto const& [guid, creatureData] : sObjectMgr->GetAllCreatureData())
     {
         CreatureTemplate const* creatureTemplate = sObjectMgr->GetCreatureTemplate(creatureData.id);
@@ -4667,7 +4704,23 @@ void TravelMgr::PrepareDestinationCache()
         if (!map)
             continue;
 
-        AreaTableEntry const* area = sAreaTableStore.LookupEntry(map->GetAreaId(PHASEMASK_NORMAL, x, y, z));
+        uint32 const fastArea = labFastZones ? areaAt(mapId, x, y) : map->GetAreaId(PHASEMASK_NORMAL, x, y, z);
+        if (labVerifyZones)
+        {
+            AreaTableEntry const* oldArea = sAreaTableStore.LookupEntry(map->GetAreaId(PHASEMASK_NORMAL, x, y, z));
+            AreaTableEntry const* newArea = sAreaTableStore.LookupEntry(fastArea);
+            uint32 const oldZone = oldArea ? (oldArea->zone ? oldArea->zone : oldArea->ID) : 0;
+            uint32 const newZone = newArea ? (newArea->zone ? newArea->zone : newArea->ID) : 0;
+            ++labZoneChecks;
+            if (oldZone != newZone)
+            {
+                ++labZoneMismatches;
+                auto& d = labZoneDiffs[{mapId, oldZone, newZone}];
+                if (!d.first++)
+                    d.second = guid;
+            }
+        }
+        AreaTableEntry const* area = sAreaTableStore.LookupEntry(fastArea);
         if (!area)
             continue;
 
@@ -4806,6 +4859,14 @@ void TravelMgr::PrepareDestinationCache()
             }
             bankerCount++;
         }
+    }
+
+    if (labVerifyZones)
+    {
+        LOG_INFO("server.loading", "LAB travel zones checked {} creatures, mismatches {}", labZoneChecks, labZoneMismatches);
+        for (auto const& [k, v] : labZoneDiffs)
+            LOG_INFO("server.loading", "LAB zone diff: map {} original zone {} fast zone {}: {} spawns (e.g. guid {})",
+                std::get<0>(k), std::get<1>(k), std::get<2>(k), v.first, v.second);
     }
 
     // Process temporary caches
