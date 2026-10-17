@@ -346,6 +346,9 @@ public:
             botAI->UpdateAI(diff);
         }
 
+        if (player->GetSession()->IsBot())
+            return;
+
         if (PlayerbotMgr* playerbotMgr = GET_PLAYERBOT_MGR(player))
         {
             playerbotMgr->UpdateAI(diff);
