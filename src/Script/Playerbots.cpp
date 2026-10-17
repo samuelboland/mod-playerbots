@@ -727,10 +727,19 @@ void AddPlayerbotsScripts()
     AddPlayerbotEncounterScripts();
     AddPlayerbotsCommandscripts();
     PlayerBotsGuildValidationScript();
-    AddSC_MagtheridonBotScripts();
-    AddSC_TempestKeepBotScripts();
-    AddSC_HyjalBotScripts();
-    AddSC_IcecrownBotScripts();
-    AddSC_RubySanctumBotScripts();
+    // Raid helpers only for raids the era can reach: three of them hook every creature update on every
+    // map, and below their expansion they would return at once on each call. Raising the era needs a restart.
+    uint32 const era = std::min<uint32>(sConfigMgr->GetOption<uint32>("AiPlayerbot.EraExpansion", 2), 2);
+    if (era >= 1)
+    {
+        AddSC_MagtheridonBotScripts();
+        AddSC_TempestKeepBotScripts();
+        AddSC_HyjalBotScripts();
+    }
+    if (era >= 2)
+    {
+        AddSC_IcecrownBotScripts();
+        AddSC_RubySanctumBotScripts();
+    }
     AddSC_randombot_level_mgr();
 }
